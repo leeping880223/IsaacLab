@@ -30,7 +30,8 @@ def main():
     args = parser.parse_args()
 
     # 讀取 lift 任務設定。
-    env_cfg, _ = resolve_task_config(TASK_NAME, "")
+    # Launcher flags were parsed above; do not pass them to Hydra again.
+    env_cfg, _ = resolve_task_config(TASK_NAME, "", overrides=[])
     env_cfg.scene.num_envs = 1
 
     # 使用任務設定中的運算裝置，例如 cuda:0。
