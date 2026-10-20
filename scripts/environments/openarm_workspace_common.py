@@ -15,14 +15,14 @@ import torch
 
 from isaaclab.utils.math import quat_apply, quat_apply_inverse
 
-RIGHT_ARM_JOINTS = "openarm_right_joint[1-7]"
-EE_BODY = "openarm_right_ee_tcp"
-SHOULDER_BODY = "openarm_right_link1"
+RIGHT_ARM_JOINTS = "follower_r_joint[1-7]"
+EE_BODY = "follower_r_hand_tcp"
+SHOULDER_BODY = "follower_r_link1"
 # 預設姿態下 TCP 的 local +z 朝世界 -z，所以用 local +z 當作夾爪的接近方向
 EE_APPROACH_AXIS = (0.0, 0.0, 1.0)
 # 檢查會不會撞桌子的手臂 body（手指、TCP 夾方塊時本來就貼近桌面，不檢查）
-ARM_LINK_BODIES = "openarm_right_link[1-7]"
-HAND_BODY = "openarm_right_hand"
+ARM_LINK_BODIES = "follower_r_link[1-7]"
+HAND_BODY = "follower_r_hand"
 
 
 def sample_right_ee_workspace(

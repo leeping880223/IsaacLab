@@ -15,7 +15,7 @@ The test uses the current bimanual lift task's robot USD and joint controls.
 Run in the Isaac Lab project directory inside Docker::
 
     uv run --extra isaacsim python scripts/environments/openarm_thin_bar_grip_test.py \
-        --num_envs 4 --viz kit --keep_open
+        --num_envs 4 --diameter_mm 7 --mass_g 30 --viz kit --keep_open
 
 Use ``--bar_offset X Y Z`` to adjust the initial cylinder centre in TCP coordinates
 [m] if the open fingers do not surround it. A positive/negative gripper action
@@ -46,12 +46,13 @@ from isaaclab.visualizers import VisualizerCfg
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import resolve_task_config
 
-TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual"
+TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual-Official"
 OUTPUT_DIR = Path(__file__).resolve().parent / "grip_output"
 LEFT_FINGER = "openarm_right_left_finger"  # "follower_r_left_finger"
 RIGHT_FINGER = "openarm_right_right_finger"  # "follower_r_right_finger"
+NEWTON_TO_GF = 1000.0 / 9.80665
 
-
+#找出指定動作（例如夾爪）在整個 action 向量中對應的欄位。
 def _term_slice(action_manager, name: str) -> slice:
     """Return the action columns belonging to a named action term."""
     start = 0
@@ -62,7 +63,7 @@ def _term_slice(action_manager, name: str) -> slice:
         start += width
     raise RuntimeError(f"Action term {name!r} was not found: {action_manager.active_terms}")
 
-
+#讀取指片對圓柱的接觸法向力，算出力的大小（N）
 def _object_normal_force(sensor) -> torch.Tensor:
     """Return each environment's finger-to-cylinder normal force magnitude [N]."""
     matrix = sensor.data.normal_force_matrix_w
@@ -70,17 +71,19 @@ def _object_normal_force(sensor) -> torch.Tensor:
         raise RuntimeError("Contact force matrix is missing; check the finger sensor and Object filter paths.")
     return torch.linalg.vector_norm(torch.nan_to_num(matrix.torch[:, 0, 0, :]), dim=-1)
 
-
+#模擬前檢查環境
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Reject invalid trial dimensions and durations before launching the simulation."""
     if (
-        args.num_envs < 1
-        or args.diameter_mm <= 0
-        or args.lift_height <= 0
-        or any(value <= 0 for value in (args.settle_s, args.open_s, args.close_s, args.lift_s, args.hold_s))
+        args.num_envs < 1 #環境數量
+        or args.diameter_mm <= 0 #圓柱直徑
+        or not math.isfinite(args.mass_g) #重量
+        or args.mass_g <= 0 #重量
+        or args.lift_height <= 0 #抬升高度
+        or any(value <= 0 for value in (args.settle_s, args.open_s, args.close_s, args.lift_s, args.hold_s)) #各階段時間
     ):
-        parser.error("num_envs, diameter_mm, lift_height and phase durations must be positive")
-    if args.physics_hz is not None and args.physics_hz < 1:
+        parser.error("num_envs, diameter_mm, mass_g, lift_height and phase durations must be positive")
+    if args.physics_hz is not None and args.physics_hz < 1: #物理更新頻率
         parser.error("physics_hz must be positive")
 
 
@@ -89,17 +92,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel robots (e.g. 4).")
     parser.add_argument("--diameter_mm", type=float, default=1.0, help="Cylinder diameter [mm].")
+    parser.add_argument("--mass_g", type=float, default=30.0, help="Cylinder mass [g] (default: 30).")
     parser.add_argument(
         "--gripper_control",
         choices=("both", "joint1_only"),
-        default="both",
+        default="joint1_only",
         help="Drive both finger joints or only joint1, leaving joint2 passive.",
     )
     parser.add_argument(
         "--bar_offset",
         type=float,
         nargs=3,
-        default=(0.03, 0.0, -0.01),  # (0.03, 0.0, -0.01)
+        default=(0.0, 0.0, 0.0),  # (0.03, 0.0, -0.01)
         metavar=("X", "Y", "Z"),
         help="Cylinder centre relative to the TCP [m].",
     )
@@ -123,7 +127,7 @@ def main() -> None:
         help="Optional physics rate; default uses the lift task setting (100 Hz).",
     )
     parser.add_argument(
-        "--csv", type=Path, default=None, help="Per-step CSV output path (default includes diameter and control mode)."
+        "--csv", type=Path, default=None, help="Per-step CSV output path (default includes diameter, mass and control mode)."
     )
     parser.add_argument("--fast", action="store_true", help="Run without real-time pacing.")
     parser.add_argument("--keep_open", action="store_true", help="Keep the Kit view running until Ctrl+C.")
@@ -133,28 +137,35 @@ def main() -> None:
 
     _validate_args(args, parser)
     if args.csv is None:
-        args.csv = OUTPUT_DIR / f"openarm_cylinder_{args.diameter_mm:g}mm_{args.gripper_control}_grip.csv"
-
+        args.csv = OUTPUT_DIR / (
+            f"openarm_official_cylinder_{args.diameter_mm:g}mm_{args.mass_g:g}g_{args.gripper_control}_grip.csv"
+        )
+    #任務帶入 
     env_cfg, _ = resolve_task_config(TASK_NAME, "", overrides=hydra_overrides)
     env_cfg.seed = args.seed
     env_cfg.scene.num_envs = args.num_envs
+    #開闔設定
     if args.gripper_control == "joint1_only":
         env_cfg.actions.gripper_action.joint_names = ["openarm_right_finger_joint1"]
         env_cfg.actions.gripper_action.open_command_expr = {"openarm_right_finger_joint1": 0.044}
         env_cfg.actions.gripper_action.close_command_expr = {"openarm_right_finger_joint1": 0.0}
     env_cfg.episode_length_s = 3600.0
+    #不到都關掉
     env_cfg.terminations.object_dropping = None
     env_cfg.events.reset_object_position = None
     env_cfg.commands.object_pose.debug_vis = False
     env_cfg.observations.policy.enable_corruption = False
+    #視角設定
     camera_eye = (3.0, 3.0, 2.0) if args.num_envs > 1 else (1.2, 1.2, 0.9)
     env_cfg.sim.default_visualizer_cfg = VisualizerCfg(eye=camera_eye, lookat=(0.0, 0.0, 0.1))
+    #物理時間步長
     if args.physics_hz is not None:
         env_cfg.sim.dt = 1.0 / args.physics_hz
         env_cfg.decimation = max(1, round(0.02 / env_cfg.sim.dt))
         env_cfg.sim.render_interval = env_cfg.decimation
-
+    #讓物件跟機器人的接觸力可以量測
     env_cfg.scene.robot.spawn.activate_contact_sensors = True
+    #把目標物件換成細長柱
     env_cfg.scene.object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.CylinderCfg(
@@ -164,16 +175,18 @@ def main() -> None:
             rigid_props=[
                 sim_utils.UsdPhysicsRigidBodyCfg(kinematic_enabled=False),
                 PhysxRigidBodyCfg(
+                    #每個物理步先找出接觸，再用 16 輪修正穿模等位置問題、2 輪修正碰撞後的速度
                     disable_gravity=False, solver_position_iteration_count=16, solver_velocity_iteration_count=2
                 ),
             ],
-            mass_props=sim_utils.MassCfg(mass=0.03),
+            mass_props=sim_utils.MassCfg(mass=args.mass_g / 1000.0),
             collision_props=sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True),
-            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
+            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5), #靜摩擦力 動模擦力
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.65, 0.7, 0.75), metallic=0.9),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.5)),
     )
+    #把兩個感測器加入left_finger_contact / right_finger_contact ,有受力就會有箭頭
     for name, finger_body in (("left_finger_contact", LEFT_FINGER), ("right_finger_contact", RIGHT_FINGER)):
         setattr(
             env_cfg.scene,
@@ -200,27 +213,8 @@ def main() -> None:
                 left_sensor = unwrapped.scene["left_finger_contact"]
                 right_sensor = unwrapped.scene["right_finger_contact"]
                 action_manager = unwrapped.action_manager
-                """
-                missing = {LEFT_FINGER, RIGHT_FINGER, "follower_r_hand"} - set(robot.body_names)
-                if missing:
-                    raise RuntimeError(f"Robot USD is missing bodies {sorted(missing)}; found {robot.body_names}")
-                print(f"[機器人] hand_tcp 是否為 articulation body：{'follower_r_hand_tcp' in robot.body_names}")
-                arm_term = action_manager.get_term("arm_action")
-                arm_names = arm_term.IO_descriptor.joint_names
-                expected_arm = {f"follower_r_joint{index}" for index in range(1, 8)}
-                if set(arm_names) != expected_arm:
-                    raise RuntimeError(f"Expected seven right-arm joints, got {arm_names}")
-                arm_ids = [robot.joint_names.index(name) for name in arm_names]
-                gripper_joint_id = robot.joint_names.index("follower_r_finger_joint1")
-                hand_idx = robot.body_names.index("follower_r_hand")
-                hand_jacobian_idx = hand_idx - 1 if robot.is_fixed_base else hand_idx
-                jacobian_joint_ids = [joint_id + robot.num_base_dofs for joint_id in arm_ids]
-                arm_slice = _term_slice(action_manager, "arm_action")
-                gripper_slice = _term_slice(action_manager, "gripper_action")
-                if gripper_slice.stop - gripper_slice.start != 1 or not isinstance(arm_term.cfg.scale, (float, int)):
-                    raise RuntimeError("This test expects one binary gripper action and a scalar arm-action scale.")
-                """
-                ###
+
+                ###[機器人 : official]
                 missing = {LEFT_FINGER, RIGHT_FINGER, "openarm_right_hand"} - set(robot.body_names)
                 if missing:
                     raise RuntimeError(f"Robot USD is missing bodies {sorted(missing)}; found {robot.body_names}")
@@ -250,9 +244,33 @@ def main() -> None:
                 if gripper_slice.stop - gripper_slice.start != 1 or not isinstance(arm_term.cfg.scale, (float, int)):
                     raise RuntimeError("This test expects one binary gripper action and a scalar arm-action scale.")
                 ###
+                """
+                #[機器人 : configured]
+                missing = {LEFT_FINGER, RIGHT_FINGER, "follower_r_hand"} - set(robot.body_names)
+                if missing:
+                    raise RuntimeError(f"Robot USD is missing bodies {sorted(missing)}; found {robot.body_names}")
+                print(f"[機器人] hand_tcp 是否為 articulation body：{'follower_r_hand_tcp' in robot.body_names}")
+                arm_term = action_manager.get_term("arm_action")
+                arm_names = arm_term.IO_descriptor.joint_names
+                expected_arm = {f"follower_r_joint{index}" for index in range(1, 8)}
+                if set(arm_names) != expected_arm:
+                    raise RuntimeError(f"Expected seven right-arm joints, got {arm_names}")
+                arm_ids = [robot.joint_names.index(name) for name in arm_names]
+                gripper_joint_id = robot.joint_names.index("follower_r_finger_joint1")
+                hand_idx = robot.body_names.index("follower_r_hand")
+                hand_jacobian_idx = hand_idx - 1 if robot.is_fixed_base else hand_idx
+                jacobian_joint_ids = [joint_id + robot.num_base_dofs for joint_id in arm_ids]
+                arm_slice = _term_slice(action_manager, "arm_action")
+                gripper_slice = _term_slice(action_manager, "gripper_action")
+                if gripper_slice.stop - gripper_slice.start != 1 or not isinstance(arm_term.cfg.scale, (float, int)):
+                    raise RuntimeError("This test expects one binary gripper action and a scalar arm-action scale.")
+                """
+                # 初始化張開夾爪的動作、重力狀態，以及各環境的接觸統計與紀錄。
                 actions = torch.zeros_like(action_manager.action)
                 actions[:, gripper_slice] = 1.0  # BinaryJointAction: nonnegative opens, negative closes.
                 step_dt = unwrapped.step_dt
+                configured_gravity_w = tuple(float(component) for component in unwrapped.sim.cfg.gravity)
+                current_gravity_w = configured_gravity_w
                 records: list[tuple] = []
                 step_count = 0
                 closing_peak = torch.zeros(args.num_envs, 2, device=unwrapped.device)
@@ -260,12 +278,15 @@ def main() -> None:
                 lift_contact_count = torch.zeros_like(closing_peak)
                 close_both_count = torch.zeros(args.num_envs, device=unwrapped.device)
                 lift_both_count = torch.zeros_like(close_both_count)
-
+                # 執行一個控制步，依階段更新接觸統計，並在需要時記錄力與運動資料。
                 def step(stage: str, count: int, *, record_force: bool = True) -> None:
                     nonlocal step_count
                     started = time.perf_counter()
                     env.step(actions)
                     step_count += 1
+                    gravity_m_s2 = math.sqrt(sum(component**2 for component in current_gravity_w))
+                    object_gravity_n = args.mass_g * 0.001 * gravity_m_s2
+                    object_gravity_gf = object_gravity_n * NEWTON_TO_GF
                     forces = torch.stack(
                         (_object_normal_force(left_sensor), _object_normal_force(right_sensor)), dim=-1
                     )
@@ -304,16 +325,25 @@ def main() -> None:
                             .cpu()
                             .tolist()
                         )
-                        records.extend((env_id, stage, step_count * step_dt, *row) for env_id, row in enumerate(rows))
-                        if count % max(1, round(0.2 / step_dt)) == 0:
-                            print(
-                                f"{stage:5s} t={step_count * step_dt:5.2f}s env0 "
-                                f"左={rows[0][0]:6.2f}N 右={rows[0][1]:6.2f}N "
-                                f"圓柱z={rows[0][2]:.3f}m 手z={rows[0][3]:.3f}m "
-                                f"關節1/2={rows[0][4]:.4f}/{rows[0][5]:.4f}m "
-                                f"驅動力估計1/2={rows[0][8]:.2f}/{rows[0][9]:.2f}N",
-                                flush=True,
-                            )
+                        records.extend(
+                            (env_id, stage, step_count * step_dt, *row, gravity_m_s2, object_gravity_n, object_gravity_gf)
+                            for env_id, row in enumerate(rows)
+                        )
+                        print(
+                            f"{stage:5s} t={step_count * step_dt:5.2f}s env0 "
+                            f"g={gravity_m_s2:.2f}m/s² 圓柱重力={object_gravity_n:.3f}N({object_gravity_gf:.1f}gf) "
+                            f"左={rows[0][0]:6.2f}N 右={rows[0][1]:6.2f}N "
+                            f"圓柱z={rows[0][2]:.3f}m 手z={rows[0][3]:.3f}m "
+                            f"關節1/2={rows[0][4]:.4f}/{rows[0][5]:.4f}m "
+                            f"驅動力估計1/2={rows[0][8]:.2f}/{rows[0][9]:.2f}N",
+                            flush=True,
+                        )
+                    elif stage == "settle":
+                        print(
+                            f"{stage:5s} t={step_count * step_dt:5.2f}s "
+                            f"g={gravity_m_s2:.2f}m/s² 圓柱重力={object_gravity_n:.3f}N({object_gravity_gf:.1f}gf)",
+                            flush=True,
+                        )
                     if not args.fast:
                         time.sleep(max(0.0, step_dt - (time.perf_counter() - started)))
 
@@ -322,19 +352,24 @@ def main() -> None:
 
                 print(
                     f"\n[測試] {args.num_envs} 個環境，物理 {1 / unwrapped.sim.cfg.dt:.0f} Hz，"
-                    f"控制 {1 / step_dt:.0f} Hz，圓柱長 60 mm、直徑 {args.diameter_mm:g} mm / 30 g；"
+                    f"控制 {1 / step_dt:.0f} Hz，圓柱長 60 mm、直徑 {args.diameter_mm:g} mm / "
+                    f"{args.mass_g:g} g（重量約 {args.mass_g / NEWTON_TO_GF:.3f} N）；"
                     f"夾爪控制={args.gripper_control}"
                 )
                 print(
                     f"[測試] TCP 局部偏移 {tuple(args.bar_offset)} m；先穩定手臂，"
                     "再在零重力下閉合，最後恢復重力並抬升。"
                 )
+                # 不計算 PyTorch 梯度，執行模擬測試
                 with torch.inference_mode():
+                    # 讓張開的機器人先穩定下來
                     for index in range(phase_steps(args.settle_s)):
                         step("settle", index, record_force=False)
 
                     # Place the cylinder once, after the robot has reached its open-hand pose.
+                    # 關閉重力，依 TCP 的局部偏移放置圓柱，並清除圓柱初速度
                     unwrapped.sim.physics_sim_view.set_gravity(carb.Float3(0.0, 0.0, 0.0))
+                    current_gravity_w = (0.0, 0.0, 0.0)
                     tcp = unwrapped.scene["ee_frame"].data
                     tcp_pos = tcp.target_pos_w.torch[:, 0, :].clone()
                     tcp_quat = tcp.target_quat_w.torch[:, 0, :].clone()
@@ -356,7 +391,7 @@ def main() -> None:
                         f"TCP local +z 的世界方向={approach_world[0].tolist()}"
                     )
                     print(f"[擺位] 各環境 TCP 局部偏移 [m]：{offset.tolist()}")
-
+                    # 保持夾爪張開，檢查圓柱是否一開始就碰到手指或偏離擺位
                     for index in range(phase_steps(args.open_s)):
                         step("open", index)
                     open_forces = torch.stack(
@@ -369,16 +404,18 @@ def main() -> None:
                         print("[注意] 圓柱在張開階段已移動超過 1 cm；請檢查與手掌或桌子的碰撞。")
 
                     actions[:, gripper_slice] = -1.0
+                    # 命令夾爪閉合，記錄左右指片的接觸力
                     for index in range(phase_steps(args.close_s)):
                         step("close", index)
                     if torch.any(closing_peak.sum(dim=-1) < 0.1):
                         print("[注意] 有環境在閉合時兩指都沒有碰到圓柱；該環境不能用來判斷指片碰撞 bug。")
-
+                    # 記錄抬升前的位置，恢復圓柱重力
                     hand_start = robot.data.body_pos_w.torch[:, hand_idx, :].clone()
                     bar_start = bar.data.root_pos_w.torch.clone()
                     unwrapped.sim.physics_sim_view.set_gravity(carb.Float3(*unwrapped.sim.cfg.gravity))
+                    current_gravity_w = configured_gravity_w
                     print("[測試] 已恢復重力，開始抬手；此後不再設定圓柱位置。")
-
+                    # 用逆運動學逐步要求手掌抬高，並持續夾緊
                     ik_cfg = DifferentialIKControllerCfg(
                         command_type="position",
                         use_relative_mode=False,
@@ -402,7 +439,7 @@ def main() -> None:
                         defaults = robot.data.default_joint_pos.torch[:, arm_ids]
                         actions[:, arm_slice] = (desired - defaults) / float(arm_term.cfg.scale)
                         step("lift", index)
-
+                    # 維持最後的手臂與夾爪命令，觀察圓柱是否滑落
                     for index in range(phase_steps(args.hold_s)):
                         step("hold", index)
 
@@ -413,6 +450,7 @@ def main() -> None:
                     slip = torch.linalg.vector_norm((bar_end - hand_end) - (bar_start - hand_start), dim=-1)
                     contact_rate = lift_contact_count / lift_steps
                     print("\n[結果] 力是指片對圓柱的法向接觸力；接觸率以 0.1 N 為界。")
+                    # 計算雙指接觸率、手掌與圓柱上升量，以及兩者相對位移
                     for env_id in range(args.num_envs):
                         print(
                             f"env {env_id}: 閉合峰值 左/右={closing_peak[env_id, 0]:.2f}/"
@@ -426,7 +464,7 @@ def main() -> None:
                             f"{slip[env_id]:.3f} m"
                         )
                     print("[判讀] 手沒有升到約 5 cm 時，先查手臂動作；某指全程 0 N 時，先檢查圓柱位置與該指片碰撞殼。")
-
+                # 將每一步的受力、位置、關節資料寫入 CSV
                 args.csv.parent.mkdir(parents=True, exist_ok=True)
                 with args.csv.open("w", newline="", encoding="utf-8") as file:
                     writer = csv.writer(file, lineterminator="\n")
@@ -445,6 +483,9 @@ def main() -> None:
                             "finger_joint2_target_m",
                             "finger_joint1_drive_est_N",
                             "finger_joint2_drive_est_N",
+                            "gravity_m_s2",
+                            "object_gravity_N",
+                            "object_gravity_gf",
                         )
                     )
                     writer.writerows(records)
