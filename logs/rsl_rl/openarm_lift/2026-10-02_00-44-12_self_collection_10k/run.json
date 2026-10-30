@@ -1,0 +1,9 @@
+{
+  "created_at": "2026-10-01T16:44:12.576220+00:00",
+  "library": "rsl_rl",
+  "metadata": {
+    "agent": "rsl_rl_cfg_entry_point"
+  },
+  "task": "IsaacContrib-Lift-Cube-OpenArm-Bimanual",
+  "version": 1
+}
