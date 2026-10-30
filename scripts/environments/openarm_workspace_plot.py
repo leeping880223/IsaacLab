@@ -33,7 +33,7 @@ from openarm_workspace_common import (
     sample_right_ee_workspace,
 )
 
-TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual"
+TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual-Official"
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace_output")
 
 

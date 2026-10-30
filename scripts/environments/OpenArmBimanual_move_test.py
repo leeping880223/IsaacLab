@@ -16,10 +16,10 @@ from isaaclab_tasks.utils import resolve_task_config
 import time
 import torch
 
-TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual" #在這邊改任務
-ACTION_INDEX = 1      # 第幾個joint
-MOVE_ACTION = -20 # 第一目標位置
-RETURN_ACTION = 3.31 # 第二目標位置
+TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual-Official-WristAligned-Clip" #在這邊改任務
+ACTION_INDEX = 6      # 第幾個joint
+MOVE_ACTION = -1.571 # 第一目標位置
+RETURN_ACTION = 1.571 # 第二目標位置
 HOLD_STEPS = 100       # 每段維持 100 個環境步
 
 def main():

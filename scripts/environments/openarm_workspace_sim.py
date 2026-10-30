@@ -38,7 +38,7 @@ from openarm_workspace_common import (
     sample_right_ee_workspace,
 )
 
-TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual"
+TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual-Official"
 MAX_CLOUD_MARKERS = 20000
 
 

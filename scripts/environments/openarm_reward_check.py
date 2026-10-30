@@ -25,7 +25,7 @@ from isaaclab_tasks.utils import resolve_task_config
 
 import torch
 
-TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual"
+TASK_NAME = "IsaacContrib-Lift-Cube-OpenArm-Bimanual-Official"
 
 
 def print_rewards(title: str, env):
