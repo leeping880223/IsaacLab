@@ -15,7 +15,7 @@ from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.utils.math import combine_frame_transforms
 
 if TYPE_CHECKING:
-    from isaaclab.assets import RigidObject
+    from isaaclab.assets import RigidObject, Articulation
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.sensors import FrameTransformer
 
@@ -92,3 +92,42 @@ class object_goal_distance(ManagerTermBase):
         if success_threshold is not None:
             self._succeeded |= is_lifted & (distance < success_threshold)
         return is_lifted.float() * (1 - torch.tanh(distance / std))
+
+def object_spin_on_table(
+    env: ManagerBasedRLEnv, minimal_height: float, object_cfg: SceneEntityCfg = SceneEntityCfg("object")
+) -> torch.Tensor:
+    """Penalize object angular speed while it is still resting on the table."""
+    object: RigidObject = env.scene[object_cfg.name]
+    on_table = object.data.root_pos_w.torch[:, 2] < minimal_height
+    return on_table * torch.linalg.norm(object.data.root_ang_vel_w.torch, dim=-1)
+
+def joint_effort_over_limit(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Penalize drive effort demanded beyond the effort limit, as a fraction of each joint's limit."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    computed = asset.data.computed_torque.torch[:, asset_cfg.joint_ids].abs()
+    limit = asset.data.joint_effort_limits.torch[:, asset_cfg.joint_ids]
+    return torch.sum((computed - limit).clamp(min=0.0) / limit, dim=1)
+
+def joint_axes_aligned(
+    env: ManagerBasedRLEnv,
+    joint_pairs: list[tuple[int, int]],
+    cos_threshold: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize pairs of joint axes that become nearly collinear (redundant-arm singularity).
+
+    ``joint_pairs`` index into ``asset_cfg.joint_ids``; ``asset_cfg.body_ids`` must hold one body on the chain.
+    Each pair contributes 0 below ``cos_threshold`` and 1 when the axes coincide.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    body = asset_cfg.body_ids[0] - 1 if asset.is_fixed_base else asset_cfg.body_ids[0]
+    cols = [j + asset.num_base_dofs for j in asset_cfg.joint_ids]
+    axes = asset.data.body_link_jacobian_w.torch[:, body, 3:, :][:, :, cols]  # joint axes in world [N, 3, J]
+    axes = axes / axes.norm(dim=1, keepdim=True).clamp(min=1e-6)
+    penalty = torch.zeros(env.num_envs, device=env.device)
+    for a, b in joint_pairs:
+        cos = (axes[:, :, a] * axes[:, :, b]).sum(-1).abs()
+        penalty += ((cos - cos_threshold) / (1.0 - cos_threshold)).clamp(min=0.0)
+    return penalty

@@ -10,8 +10,11 @@ __all__ = [
     "object_ee_distance",
     "object_goal_distance",
     "object_is_lifted",
+    "object_spin_on_table",
+    "joint_effort_over_limit",
+    "joint_axes_aligned",
 ]
 
 from .observations import object_position_in_robot_root_frame
-from .rewards import object_ee_distance, object_goal_distance, object_is_lifted
+from .rewards import object_ee_distance, object_goal_distance, object_is_lifted, object_spin_on_table, joint_effort_over_limit, joint_axes_aligned
 from isaaclab.envs.mdp import *
